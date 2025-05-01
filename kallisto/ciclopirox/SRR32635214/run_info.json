@@ -1,0 +1,13 @@
+{
+	"n_targets": 190432,
+	"n_bootstraps": 100,
+	"n_processed": 7017978,
+	"n_pseudoaligned": 6453320,
+	"n_unique": 683183,
+	"p_pseudoaligned": 92.0,
+	"p_unique": 9.7,
+	"kallisto_version": "0.44.0",
+	"index_version": 10,
+	"start_time": "Wed Apr 23 17:10:18 2025",
+	"call": "kallisto quant -i /gpfs/scratch/jz4391/asi-final/HomoSapiens -o /gpfs/scratch/jz4391/asi-final/kallisto/ciclopirox/SRR32635214/ -b 100 --single -l 200 -s 20 --bias /gpfs/scratch/jz4391/asi-final/samples/ciclopirox/SRR32635214.fastq.gz"
+}

@@ -1,0 +1,13 @@
+{
+	"n_targets": 190432,
+	"n_bootstraps": 100,
+	"n_processed": 7443170,
+	"n_pseudoaligned": 6866380,
+	"n_unique": 789491,
+	"p_pseudoaligned": 92.3,
+	"p_unique": 10.6,
+	"kallisto_version": "0.44.0",
+	"index_version": 10,
+	"start_time": "Wed Apr 23 18:03:48 2025",
+	"call": "kallisto quant -i /gpfs/scratch/jz4391/asi-final/HomoSapiens -o /gpfs/scratch/jz4391/asi-final/kallisto/wortmannin/SRR32635205/ -b 100 --single -l 200 -s 20 --bias /gpfs/scratch/jz4391/asi-final/samples/wortmannin/SRR32635205.fastq.gz"
+}
