@@ -1,0 +1,1572 @@
+# Differential Expression Analysis
+Questions: 
+  1. What is the differential expression of genes in relation to the activity of hypoxia/HIF-1?
+  2. How does gene expression differ across the various treatments?
+  3. How does the expression of HIF-1 biomarker genes correlate with the chemicals identified that activate HIF-1?
+
+```{r}
+### LOAD REQUIRED LIBRARIES
+library("DESeq2")
+library("pheatmap")
+library("RColorBrewer")
+library("vsn")
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library("genefilter")
+library("biomaRt")
+library("IHW")
+library("ggplot2")
+library("apeglm")
+library("sleuth")
+library("dplyr")
+library("edgeR")
+library("statmod")
+library("ggrepel")
+library("ggpubr")
+library("scales")
+```
+
+#### DESeq2
+
+##### DMSO: 
+```{r}
+CountTable <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/dmso/output.txt", header=TRUE, row.names=1) 
+CountTable <- CountTable[c("SRR32635221", "SRR32635220", "SRR32635219", "SRR32635218", "SRR32635217", "SRR32635216")]
+samples <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/dmso_sample.txt", header=TRUE)
+
+dds <- DESeqDataSetFromMatrix(countData = CountTable, colData=samples, design= ~ batch + condition)
+
+dds = DESeq(dds)
+counts(dds)->raw_counts
+raw_counts<-as.data.frame(counts(dds))
+
+norm_counts = counts(dds, normalized = TRUE)
+norm_counts<-as.data.frame(norm_counts)
+
+vsd1 <- varianceStabilizingTransformation(dds, blind=FALSE)
+```
+
+```{r}
+data <- plotPCA(vsd1, returnData=TRUE)
+
+percentVar <- round(100 * attr(data, "percentVar"))
+
+ggplot(data, aes(PC1, PC2, color=condition)) +
+  geom_point(size=3)+
+  scale_color_manual(values=c("lightblue","red"))+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ggtitle("PCA Plot for DMSO Samples")
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/pca_dmso.png")
+```
+
+```{r}
+comparisons = rbind(c("HIF1A-null","WT"))
+adj_p_val = 0.1
+abs_log2fc = 1
+
+for(i in 1:nrow(comparisons)){
+  res = results(dds, contrast = c("condition", comparisons[i,1], comparisons[i,2]))
+  res_sig = res[res[,6] < adj_p_val & !is.na(res[,6]) & abs(res[,2]) >abs_log2fc,]
+  assign(paste(comparisons[i,1],"_", comparisons[i,2], sep =""), res)
+  assign(paste(comparisons[i,1],"_", comparisons[i,2],"_sig", sep =""), res_sig)
+}
+
+`HIF1A-null_WT_df`<-as.data.frame(counts(dds))
+
+`baseMeanHIFA1-null` = rowMeans(counts(dds,normalized=TRUE)[,dds$condition == "HIF1A-null"])
+`baseMean_WT` = rowMeans(counts(dds,normalized=TRUE)[,dds$condition == "WT"])
+
+res1 = cbind(as.data.frame(res), `baseMeanHIFA1-null`, `baseMean_WT`)
+
+res1$symbol <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+res1$entrez <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+```
+
+```{r}
+df_rna<-as.data.frame(res1)
+df_rna$log10.pvalue<-(-1*log10(df_rna$padj))
+df_rna$significant<-"No"
+
+rows<-which(df_rna$padj< adj_p_val & !is.na(df_rna$padj) & abs(df_rna$log2FoldChange)>abs_log2fc)
+df_rna$significant[rows]<-"Yes"
+
+df_rna$direction<-df_rna$significant
+df_rna$direction[which(df_rna$padj<adj_p_val & df_rna$log2FoldChange>abs_log2fc)]<-"Up-Regulated"
+df_rna$direction[which(df_rna$padj<adj_p_val & df_rna$log2FoldChange< -abs_log2fc)]<-"Down-Regulated"
+write.table(df_rna,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/", "dmso_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+
+norm_counts_df = counts(dds, normalized = TRUE)
+rownames(norm_counts_df)<- df_rna$symbol[match(row.names(norm_counts_df), row.names(df_rna))]
+write.table(norm_counts_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/", "dmso_normalized_counts.txt"), row.names=TRUE,quote = F, sep = "\t")
+```
+
+```{r}
+hist(df_rna$log10.pvalue) 
+hist(df_rna$log2FoldChange)
+
+df_rna$label<-"No"
+df_rna$label[which(df_rna$padj< adj_p_val & abs(df_rna$log2FoldChange)>abs_log2fc)]<-"Yes"
+
+ggplot(df_rna, aes(log2FoldChange, log10.pvalue))+
+  geom_point(aes(colour = direction),size=1)+
+  scale_colour_manual(values=c("deepskyblue", "grey","red"))+
+  xlim(-6,6)+
+  ylim(0,6)+
+  xlab(expression(paste(log[2], 'FC(HIF1A-null/WT)')))+
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank())+
+  theme(text = element_text(size=5)) +
+  theme(axis.text = element_text( color = "black", size = 10))+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line=element_line()) +
+  geom_vline(xintercept=-abs_log2fc,linetype="dotted")+
+  geom_vline(xintercept=abs_log2fc,linetype="dotted")+
+  geom_text_repel(
+    data = subset(df_rna, label=="Yes"),
+    aes(label = df_rna$symbol[which(df_rna$label=="Yes")]),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) + 
+  ggtitle("Volcano PLot for DMSO Samples") + 
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/volcano_dmso.png")
+
+```
+
+
+##### COCl2
+```{r}
+CountTable <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/cocl2/output.txt", header=TRUE, row.names=1) 
+CountTable <- CountTable[c("SRR32635203", "SRR32635202", "SRR32635201", "SRR32635200", "SRR32635199", "SRR32635198")]
+samples <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/cocl2_sample.txt", header=TRUE)
+
+dds <- DESeqDataSetFromMatrix(countData = CountTable, colData=samples, design= ~ batch + condition)
+
+dds = DESeq(dds)
+counts(dds)->raw_counts
+raw_counts<-as.data.frame(counts(dds))
+
+norm_counts = counts(dds, normalized = TRUE)
+norm_counts<-as.data.frame(norm_counts)
+
+vsd1 <- varianceStabilizingTransformation(dds, blind=FALSE)
+```
+
+```{r}
+data <- plotPCA(vsd1, returnData=TRUE)
+
+percentVar <- round(100 * attr(data, "percentVar"))
+
+ggplot(data, aes(PC1, PC2, color=condition)) +
+  geom_point(size=3)+
+  scale_color_manual(values=c("lightblue","red"))+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ggtitle("PCA Plot for COCl2 Samples")
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/pca_cocl2.png")
+```
+
+```{r}
+comparisons = rbind(c("HIF1A-null","WT"))
+adj_p_val = 0.1
+abs_log2fc = 1
+
+for(i in 1:nrow(comparisons)){
+  res = results(dds, contrast = c("condition", comparisons[i,1], comparisons[i,2]))
+  res_sig = res[res[,6] < adj_p_val & !is.na(res[,6]) & abs(res[,2]) >abs_log2fc,]
+  assign(paste(comparisons[i,1],"_", comparisons[i,2], sep =""), res)
+  assign(paste(comparisons[i,1],"_", comparisons[i,2],"_sig", sep =""), res_sig)
+}
+
+`HIF1A-null_WT_df`<-as.data.frame(counts(dds))
+
+`baseMeanHIFA1-null` = rowMeans(counts(dds,normalized=TRUE)[,dds$condition == "HIF1A-null"])
+`baseMean_WT` = rowMeans(counts(dds,normalized=TRUE)[,dds$condition == "WT"])
+
+res1 = cbind(as.data.frame(res), `baseMeanHIFA1-null`, `baseMean_WT`)
+
+res1$symbol <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+res1$entrez <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+```
+
+```{r}
+df_rna<-as.data.frame(res1)
+df_rna$log10.pvalue<-(-1*log10(df_rna$padj))
+df_rna$significant<-"No"
+
+rows<-which(df_rna$padj< adj_p_val & !is.na(df_rna$padj) & abs(df_rna$log2FoldChange)>abs_log2fc)
+df_rna$significant[rows]<-"Yes"
+
+df_rna$direction<-df_rna$significant
+df_rna$direction[which(df_rna$padj<adj_p_val & df_rna$log2FoldChange>abs_log2fc)]<-"Up-Regulated"
+df_rna$direction[which(df_rna$padj<adj_p_val & df_rna$log2FoldChange< -abs_log2fc)]<-"Down-Regulated"
+write.table(df_rna,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/", "cocl2_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+
+norm_counts_df = counts(dds, normalized = TRUE)
+rownames(norm_counts_df)<- df_rna$symbol[match(row.names(norm_counts_df), row.names(df_rna))]
+write.table(norm_counts_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/", "cocl2_normalized_counts.txt"), row.names=TRUE,quote = F, sep = "\t")
+```
+
+```{r}
+hist(df_rna$log10.pvalue) 
+hist(df_rna$log2FoldChange)
+
+df_rna$label<-"No"
+df_rna$label[which(df_rna$padj< adj_p_val & abs(df_rna$log2FoldChange)>abs_log2fc)]<-"Yes"
+
+ggplot(df_rna, aes(log2FoldChange, log10.pvalue))+
+  geom_point(aes(colour = direction),size=1)+
+  scale_colour_manual(values=c("deepskyblue", "grey","red"))+
+  xlim(-6,6)+
+  ylim(0,6)+
+  xlab(expression(paste(log[2], 'FC(CHIF1A-null/WT)')))+
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank())+
+  theme(text = element_text(size=5)) +
+  theme(axis.text = element_text( color = "black", size = 10))+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line=element_line()) +
+  geom_vline(xintercept=-abs_log2fc,linetype="dotted")+
+  geom_vline(xintercept=abs_log2fc,linetype="dotted")+
+  geom_text_repel(
+    data = subset(df_rna, label=="Yes"),
+    aes(label = df_rna$symbol[which(df_rna$label=="Yes")]),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) + 
+  ggtitle("Volcano PLot for COCl2 Samples") + 
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/volcano_cocl2.png")
+
+```
+
+##### Ciclopirox
+```{r}
+CountTable <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/ciclopirox/output.txt", header=TRUE, row.names=1) 
+CountTable <- CountTable[c("SRR32635215", "SRR32635214", "SRR32635213", "SRR32635212", "SRR32635211", "SRR32635210")]
+samples <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/ciclopirox_sample.txt", header=TRUE)
+
+dds <- DESeqDataSetFromMatrix(countData = CountTable, colData=samples, design= ~ batch + condition)
+
+dds = DESeq(dds)
+counts(dds)->raw_counts
+raw_counts<-as.data.frame(counts(dds))
+
+norm_counts = counts(dds, normalized = TRUE)
+norm_counts<-as.data.frame(norm_counts)
+
+vsd1 <- varianceStabilizingTransformation(dds, blind=FALSE)
+```
+
+```{r}
+data <- plotPCA(vsd1, returnData=TRUE)
+
+percentVar <- round(100 * attr(data, "percentVar"))
+
+ggplot(data, aes(PC1, PC2, color=condition)) +
+  geom_point(size=3)+
+  scale_color_manual(values=c("lightblue","red"))+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ggtitle("PCA Plot for Ciclopirox Samples")
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/pca_ciclopirox.png")
+```
+
+```{r}
+comparisons = rbind(c("HIF1A-null","WT"))
+adj_p_val = 0.1
+abs_log2fc = 1
+
+for(i in 1:nrow(comparisons)){
+  res = results(dds, contrast = c("condition", comparisons[i,1], comparisons[i,2]))
+  res_sig = res[res[,6] < adj_p_val & !is.na(res[,6]) & abs(res[,2]) >abs_log2fc,]
+  assign(paste(comparisons[i,1],"_", comparisons[i,2], sep =""), res)
+  assign(paste(comparisons[i,1],"_", comparisons[i,2],"_sig", sep =""), res_sig)
+}
+
+`HIF1A-null_WT_df`<-as.data.frame(counts(dds))
+
+`baseMeanHIFA1-null` = rowMeans(counts(dds,normalized=TRUE)[,dds$condition == "HIF1A-null"])
+`baseMean_WT` = rowMeans(counts(dds,normalized=TRUE)[,dds$condition == "WT"])
+
+res1 = cbind(as.data.frame(res), `baseMeanHIFA1-null`, `baseMean_WT`)
+
+res1$symbol <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+res1$entrez <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+```
+
+```{r}
+df_rna<-as.data.frame(res1)
+df_rna$log10.pvalue<-(-1*log10(df_rna$padj))
+df_rna$significant<-"No"
+
+rows<-which(df_rna$padj< adj_p_val & !is.na(df_rna$padj) & abs(df_rna$log2FoldChange)>abs_log2fc)
+df_rna$significant[rows]<-"Yes"
+
+df_rna$direction<-df_rna$significant
+df_rna$direction[which(df_rna$padj<adj_p_val & df_rna$log2FoldChange>abs_log2fc)]<-"Up-Regulated"
+df_rna$direction[which(df_rna$padj<adj_p_val & df_rna$log2FoldChange< -abs_log2fc)]<-"Down-Regulated"
+write.table(df_rna,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/", "ciclopirox_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+
+norm_counts_df = counts(dds, normalized = TRUE)
+rownames(norm_counts_df)<- df_rna$symbol[match(row.names(norm_counts_df), row.names(df_rna))]
+write.table(norm_counts_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/", "ciclopirox_normalized_counts.txt"), row.names=TRUE,quote = F, sep = "\t")
+```
+
+```{r}
+hist(df_rna$log10.pvalue) 
+hist(df_rna$log2FoldChange)
+
+df_rna$label<-"No"
+df_rna$label[which(df_rna$padj< adj_p_val & abs(df_rna$log2FoldChange)>abs_log2fc)]<-"Yes"
+
+ggplot(df_rna, aes(log2FoldChange, log10.pvalue))+
+  geom_point(aes(colour = direction),size=1)+
+  scale_colour_manual(values=c("deepskyblue", "grey","red"))+
+  xlim(-6,6)+
+  ylim(0,6)+
+  xlab(expression(paste(log[2], 'FC(HIF1A-null/WT)')))+
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank())+
+  theme(text = element_text(size=5)) +
+  theme(axis.text = element_text( color = "black", size = 10))+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line=element_line()) +
+  geom_vline(xintercept=-abs_log2fc,linetype="dotted")+
+  geom_vline(xintercept=abs_log2fc,linetype="dotted")+
+  geom_text_repel(
+    data = subset(df_rna, label=="Yes"),
+    aes(label = df_rna$symbol[which(df_rna$label=="Yes")]),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) + 
+  ggtitle("Volcano PLot for Ciclopirox Samples") + 
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/volcano_ciclopirox.png")
+
+```
+
+##### Wortmannin
+```{r}
+CountTable <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/wortmannin/output.txt", header=TRUE, row.names=1) 
+CountTable <- CountTable[c("SRR32635209", "SRR32635208", "SRR32635207", "SRR32635206", "SRR32635205", "SRR32635204")]
+samples <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/wortmannin_sample.txt", header=TRUE)
+
+dds <- DESeqDataSetFromMatrix(countData = CountTable, colData=samples, design= ~ batch + condition)
+
+dds = DESeq(dds)
+counts(dds)->raw_counts
+raw_counts<-as.data.frame(counts(dds))
+
+norm_counts = counts(dds, normalized = TRUE)
+norm_counts<-as.data.frame(norm_counts)
+
+vsd1 <- varianceStabilizingTransformation(dds, blind=FALSE)
+```
+
+```{r}
+data <- plotPCA(vsd1, returnData=TRUE)
+
+percentVar <- round(100 * attr(data, "percentVar"))
+
+ggplot(data, aes(PC1, PC2, color=condition)) +
+  geom_point(size=3)+
+  scale_color_manual(values=c("lightblue","red"))+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ggtitle("PCA Plot for Wortmannin Samples")
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/pca_wortmannin.png")
+```
+
+```{r}
+comparisons = rbind(c("HIF1A-null","WT"))
+adj_p_val = 0.1
+abs_log2fc = 1
+
+for(i in 1:nrow(comparisons)){
+  res = results(dds, contrast = c("condition", comparisons[i,1], comparisons[i,2]))
+  res_sig = res[res[,6] < adj_p_val & !is.na(res[,6]) & abs(res[,2]) >abs_log2fc,]
+  assign(paste(comparisons[i,1],"_", comparisons[i,2], sep =""), res)
+  assign(paste(comparisons[i,1],"_", comparisons[i,2],"_sig", sep =""), res_sig)
+}
+
+`HIF1A-null_WT_df`<-as.data.frame(counts(dds))
+
+`baseMeanHIFA1-null` = rowMeans(counts(dds,normalized=TRUE)[,dds$condition == "HIF1A-null"])
+`baseMean_WT` = rowMeans(counts(dds,normalized=TRUE)[,dds$condition == "WT"])
+
+res1 = cbind(as.data.frame(res), `baseMeanHIFA1-null`, `baseMean_WT`)
+
+res1$symbol <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+res1$entrez <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+```
+
+```{r}
+df_rna<-as.data.frame(res1)
+df_rna$log10.pvalue<-(-1*log10(df_rna$padj))
+df_rna$significant<-"No"
+
+rows<-which(df_rna$padj< adj_p_val & !is.na(df_rna$padj) & abs(df_rna$log2FoldChange)>abs_log2fc)
+df_rna$significant[rows]<-"Yes"
+
+df_rna$direction<-df_rna$significant
+df_rna$direction[which(df_rna$padj<adj_p_val & df_rna$log2FoldChange>abs_log2fc)]<-"Up-Regulated"
+df_rna$direction[which(df_rna$padj<adj_p_val & df_rna$log2FoldChange< -abs_log2fc)]<-"Down-Regulated"
+write.table(df_rna,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/", "wortmannin_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+
+norm_counts_df = counts(dds, normalized = TRUE)
+rownames(norm_counts_df)<- df_rna$symbol[match(row.names(norm_counts_df), row.names(df_rna))]
+write.table(norm_counts_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/", "wortmannin_normalized_counts.txt"), row.names=TRUE,quote = F, sep = "\t")
+```
+
+```{r}
+hist(df_rna$log10.pvalue) 
+hist(df_rna$log2FoldChange)
+
+df_rna$label<-"No"
+df_rna$label[which(df_rna$padj< adj_p_val & abs(df_rna$log2FoldChange)>abs_log2fc)]<-"Yes"
+
+ggplot(df_rna, aes(log2FoldChange, log10.pvalue))+
+  geom_point(aes(colour = direction),size=1)+
+  scale_colour_manual(values=c("deepskyblue", "grey","red"))+
+  xlim(-6,6)+
+  ylim(0,6)+
+  xlab(expression(paste(log[2], 'FC(HIF1A-null/WT)')))+
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank())+
+  theme(text = element_text(size=5)) +
+  theme(axis.text = element_text( color = "black", size = 10))+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line=element_line()) +
+  geom_vline(xintercept=-abs_log2fc,linetype="dotted")+
+  geom_vline(xintercept=abs_log2fc,linetype="dotted")+
+  geom_text_repel(
+    data = subset(df_rna, label=="Yes"),
+    aes(label = df_rna$symbol[which(df_rna$label=="Yes")]),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) + 
+  ggtitle("Volcano PLot for Wortmannin Samples") + 
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/volcano_wortmannin.png")
+
+```
+##### All Treatments (Not sure if this is valubale analysis)
+
+```{r}
+CountTable <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/output.txt", header=TRUE, row.names=1) 
+CountTable <- CountTable[c("SRR32635221", "SRR32635220", "SRR32635219", "SRR32635218", "SRR32635217", "SRR32635216", "SRR32635215", "SRR32635214", "SRR32635213", "SRR32635212", "SRR32635211", "SRR32635210", "SRR32635209", "SRR32635208", "SRR32635207", "SRR32635206", "SRR32635205", "SRR32635204", "SRR32635203", "SRR32635202", "SRR32635201", "SRR32635200", "SRR32635199", "SRR32635198")]
+samples <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples_list.txt", header=TRUE)
+
+dds <- DESeqDataSetFromMatrix(countData = CountTable, colData=samples, design= ~condition)
+
+dds = DESeq(dds)
+counts(dds)->raw_counts
+raw_counts<-as.data.frame(counts(dds))
+
+norm_counts = counts(dds, normalized = TRUE)
+norm_counts<-as.data.frame(norm_counts)
+
+vsd1 <- varianceStabilizingTransformation(dds, blind=FALSE)
+```
+
+```{r}
+data <- plotPCA(vsd1, returnData=TRUE)
+
+percentVar <- round(100 * attr(data, "percentVar"))
+
+ggplot(data, aes(PC1, PC2, color=condition)) +
+  geom_point(size=3)+
+  scale_color_manual(values=c("lightblue", "lightgreen", "pink", "yellow2", "deepskyblue","darkolivegreen4", "red", "goldenrod" ))+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ggtitle("PCA Plot for All Samples")
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/all_samples_pca.png")
+```
+
+```{r}
+comparisons = rbind(c("HIF1A-null","WT"))
+adj_p_val = 0.1
+abs_log2fc = 1
+
+for(i in 1:nrow(comparisons)){
+  res = results(dds, contrast = c("condition", comparisons[i,1], comparisons[i,2]))
+  res_sig = res[res[,6] < adj_p_val & !is.na(res[,6]) & abs(res[,2]) >abs_log2fc,]
+  assign(paste(comparisons[i,1],"_", comparisons[i,2], sep =""), res)
+  assign(paste(comparisons[i,1],"_", comparisons[i,2],"_sig", sep =""), res_sig)
+}
+
+`HIF1A-null_WT_df`<-as.data.frame(counts(dds))
+
+`baseMeanHIFA1-null` = rowMeans(counts(dds,normalized=TRUE)[,dds$condition == "HIF1A-null"])
+`baseMean_WT` = rowMeans(counts(dds,normalized=TRUE)[,dds$condition == "WT"])
+
+res1 = cbind(as.data.frame(res), `baseMeanHIFA1-null`, `baseMean_WT`)
+
+res1$symbol <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+res1$entrez <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+```
+
+```{r}
+df_rna<-as.data.frame(res1)
+df_rna$log10.pvalue<-(-1*log10(df_rna$padj))
+df_rna$significant<-"No"
+
+rows<-which(df_rna$padj< adj_p_val & !is.na(df_rna$padj) & abs(df_rna$log2FoldChange)>abs_log2fc)
+df_rna$significant[rows]<-"Yes"
+
+df_rna$direction<-df_rna$significant
+df_rna$direction[which(df_rna$padj<adj_p_val & df_rna$log2FoldChange>abs_log2fc)]<-"Up-Regulated"
+df_rna$direction[which(df_rna$padj<adj_p_val & df_rna$log2FoldChange< -abs_log2fc)]<-"Down-Regulated"
+write.table(df_rna,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/", "all_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+
+norm_counts_df = counts(dds, normalized = TRUE)
+rownames(norm_counts_df)<- df_rna$symbol[match(row.names(norm_counts_df), row.names(df_rna))]
+write.table(norm_counts_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/", "all_normalized_counts.txt"), row.names=TRUE,quote = F, sep = "\t")
+```
+
+```{r}
+hist(df_rna$log10.pvalue) 
+hist(df_rna$log2FoldChange)
+
+df_rna$label<-"No"
+df_rna$label[which(df_rna$padj< adj_p_val & abs(df_rna$log2FoldChange)>abs_log2fc)]<-"Yes"
+
+ggplot(df_rna, aes(log2FoldChange, log10.pvalue))+
+  geom_point(aes(colour = direction),size=1)+
+  scale_colour_manual(values=c("deepskyblue", "grey","red"))+
+  xlim(-6,6)+
+  ylim(0,6)+
+  xlab(expression(paste(log[2], 'FC(HIF1A-null/WT)')))+
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank())+
+  theme(text = element_text(size=5)) +
+  theme(plot.title = element_blank())+
+  theme(axis.text = element_text( color = "black", size = 10))+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line=element_line()) +
+  geom_vline(xintercept=-abs_log2fc,linetype="dotted")+
+  geom_vline(xintercept=abs_log2fc,linetype="dotted")+
+  geom_text_repel(
+    data = subset(df_rna, label=="Yes"),
+    aes(label = df_rna$symbol[which(df_rna$label=="Yes")]),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) + 
+  ggtitle("Volcano PLot for All Samples")
+
+```
+
+#### EdgeR
+
+##### DMSO: 
+```{r}
+CountTable <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/dmso/output.txt", header=TRUE, row.names=1) 
+CountTable <- CountTable[c("SRR32635221", "SRR32635220", "SRR32635219", "SRR32635218", "SRR32635217", "SRR32635216")]
+samples <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/dmso_sample.txt", header=TRUE)
+
+dgList <- DGEList(counts=CountTable, samples = samples, group = samples$condition)
+
+countsPerMillion <- cpm(dgList)
+countCheck <- countsPerMillion > 1
+keep <- which(rowSums(countCheck) >= 2)
+dgList <- dgList[keep,]
+
+dgList <- calcNormFactors(dgList, method="TMM")
+
+png("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/mds_dmso.png", width=800, height=600)
+plotMDS(dgList, main = "MDS PLot for DMSO Samples")
+dev.off()
+```
+
+```{r}
+condition <- as.factor(samples$condition)
+batch <- as.factor(samples$batch)
+design <- model.matrix(~batch + condition)
+rownames(design) <- colnames(dgList)
+
+disp <- estimateDisp(dgList, design)
+plotBCV(disp)
+
+et <- exactTest(disp)
+
+dat <- et$table
+
+dat$symbol <- mapIds(org.Hs.eg.db, keys=row.names(dat), column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+dat$entrez <- mapIds(org.Hs.eg.db, keys=row.names(dat), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+
+`HIFA-null_siRNA` <- dat
+adj_p_val = 0.05
+abs_log2fc = 1
+
+rna_df <- as.data.frame(`HIFA-null_siRNA`)
+rna_df$padj <-p.adjust(rna_df$PValue, method="BH")
+rna_df$log10.pvalue <- (-1 * log10(rna_df$padj))
+
+rna_df$significant <- "No"
+
+rows <- which(rna_df$padj< adj_p_val & !is.na(rna_df$padj) & abs(rna_df$logFC)>abs_log2fc)
+rna_df$significant[rows] <- "Yes"
+
+rna_df$direction <- rna_df$significant
+rna_df$direction[which(rna_df$padj < adj_p_val & rna_df$logFC > abs_log2fc)] <- "Up-Regulated"
+rna_df$direction[which(rna_df$padj < adj_p_val & rna_df$logFC < -abs_log2fc)] <- "Down-Regulated"
+write.table(rna_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/", "dmso_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+```
+
+```{r}
+rna_df$label <- "No"
+rna_df$label[which(rna_df$padj < adj_p_val & abs(rna_df$logFC) > abs_log2fc)] <- "Yes"
+
+ggplot(rna_df, aes(logFC, log10.pvalue)) +
+  geom_point(aes(colour = direction), size=1) +
+  scale_colour_manual(values=c("deepskyblue", "grey", "red")) +
+  xlim(-6,6) +
+  ylim(0,5) +
+  xlab(expression(paste(log[2], 'FC(Ctrl/siRNA)'))) +
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank()) +
+  theme(text = element_text(size=5)) +
+  theme(axis.text = element_text(color = "black", size = 10)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line=element_line()) +
+  geom_vline(xintercept=-abs_log2fc, linetype="dotted") +
+  geom_vline(xintercept=abs_log2fc, linetype="dotted") +
+  geom_text_repel(
+    data = subset(rna_df, label == "Yes"),
+    aes(label = symbol),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) + 
+  ggtitle("Volcano PLot for DMSO Samples") + 
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/volcano_dmso.png")
+
+```
+
+
+##### COCl2
+```{r}
+CountTable <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/cocl2/output.txt", header=TRUE, row.names=1) 
+CountTable <- CountTable[c("SRR32635203", "SRR32635202", "SRR32635201", "SRR32635200", "SRR32635199", "SRR32635198")]
+samples <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/cocl2_sample.txt", header=TRUE)
+
+dgList <- DGEList(counts=CountTable, samples = samples, group = samples$condition)
+
+countsPerMillion <- cpm(dgList)
+countCheck <- countsPerMillion > 1
+keep <- which(rowSums(countCheck) >= 2)
+dgList <- dgList[keep,]
+
+dgList <- calcNormFactors(dgList, method="TMM")
+
+png("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/mds_cocl2.png", width=800, height=600)
+plotMDS(dgList, main = "MDS PLot for COCl2 Samples")
+dev.off()
+```
+
+```{r}
+condition <- as.factor(samples$condition)
+batch <- as.factor(samples$batch)
+design <- model.matrix(~batch + condition)
+rownames(design) <- colnames(dgList)
+
+disp <- estimateDisp(dgList, design)
+plotBCV(disp)
+
+et <- exactTest(disp)
+
+dat <- et$table
+
+dat$symbol <- mapIds(org.Hs.eg.db, keys=row.names(dat), column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+dat$entrez <- mapIds(org.Hs.eg.db, keys=row.names(dat), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+
+`HIFA-null_siRNA` <- dat
+adj_p_val = 0.05
+abs_log2fc = 1
+
+rna_df <- as.data.frame(`HIFA-null_siRNA`)
+rna_df$padj <-p.adjust(rna_df$PValue, method="BH")
+rna_df$log10.pvalue <- (-1 * log10(rna_df$padj))
+
+rna_df$significant <- "No"
+
+rows <- which(rna_df$padj< adj_p_val & !is.na(rna_df$padj) & abs(rna_df$logFC)>abs_log2fc)
+rna_df$significant[rows] <- "Yes"
+
+rna_df$direction <- rna_df$significant
+rna_df$direction[which(rna_df$padj < adj_p_val & rna_df$logFC > abs_log2fc)] <- "Up-Regulated"
+rna_df$direction[which(rna_df$padj < adj_p_val & rna_df$logFC < -abs_log2fc)] <- "Down-Regulated"
+write.table(rna_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/", "cocl2_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+```
+
+```{r}
+rna_df$label <- "No"
+rna_df$label[which(rna_df$padj < adj_p_val & abs(rna_df$logFC) > abs_log2fc)] <- "Yes"
+
+ggplot(rna_df, aes(logFC, log10.pvalue)) +
+  geom_point(aes(colour = direction), size=1) +
+  scale_colour_manual(values=c("deepskyblue", "grey", "red")) +
+  xlim(-6,6) +
+  ylim(0,5) +
+  xlab(expression(paste(log[2], 'FC(Ctrl/siRNA)'))) +
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank()) +
+  theme(text = element_text(size=5)) +
+  theme(axis.text = element_text(color = "black", size = 10)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line=element_line()) +
+  geom_vline(xintercept=-abs_log2fc, linetype="dotted") +
+  geom_vline(xintercept=abs_log2fc, linetype="dotted") +
+  geom_text_repel(
+    data = subset(rna_df, label == "Yes"),
+    aes(label = symbol),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) + 
+  ggtitle("Volcano PLot for COCl2 Samples") + 
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/volcano_cocl2.png")
+
+```
+
+##### Ciclopirox
+```{r}
+CountTable <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/ciclopirox/output.txt", header=TRUE, row.names=1) 
+CountTable <- CountTable[c("SRR32635215", "SRR32635214", "SRR32635213", "SRR32635212", "SRR32635211", "SRR32635210")]
+samples <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/ciclopirox_sample.txt", header=TRUE)
+
+dgList <- DGEList(counts=CountTable, samples = samples, group = samples$condition)
+
+countsPerMillion <- cpm(dgList)
+countCheck <- countsPerMillion > 1
+keep <- which(rowSums(countCheck) >= 2)
+dgList <- dgList[keep,]
+
+dgList <- calcNormFactors(dgList, method="TMM")
+
+png("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/mds_ciclopirox.png", width=800, height=600)
+plotMDS(dgList, main = "MDS PLot for Ciclopirox Samples")
+dev.off()
+```
+
+```{r}
+condition <- as.factor(samples$condition)
+batch <- as.factor(samples$batch)
+design <- model.matrix(~batch + condition)
+rownames(design) <- colnames(dgList)
+
+disp <- estimateDisp(dgList, design)
+plotBCV(disp)
+
+et <- exactTest(disp)
+
+dat <- et$table
+
+dat$symbol <- mapIds(org.Hs.eg.db, keys=row.names(dat), column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+dat$entrez <- mapIds(org.Hs.eg.db, keys=row.names(dat), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+
+`HIFA-null_siRNA` <- dat
+adj_p_val = 0.05
+abs_log2fc = 1
+
+rna_df <- as.data.frame(`HIFA-null_siRNA`)
+rna_df$padj <-p.adjust(rna_df$PValue, method="BH")
+rna_df$log10.pvalue <- (-1 * log10(rna_df$padj))
+
+rna_df$significant <- "No"
+
+rows <- which(rna_df$padj< adj_p_val & !is.na(rna_df$padj) & abs(rna_df$logFC)>abs_log2fc)
+rna_df$significant[rows] <- "Yes"
+
+rna_df$direction <- rna_df$significant
+rna_df$direction[which(rna_df$padj < adj_p_val & rna_df$logFC > abs_log2fc)] <- "Up-Regulated"
+rna_df$direction[which(rna_df$padj < adj_p_val & rna_df$logFC < -abs_log2fc)] <- "Down-Regulated"
+write.table(rna_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/", "ciclopirox_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+```
+
+```{r}
+rna_df$label <- "No"
+rna_df$label[which(rna_df$padj < adj_p_val & abs(rna_df$logFC) > abs_log2fc)] <- "Yes"
+
+ggplot(rna_df, aes(logFC, log10.pvalue)) +
+  geom_point(aes(colour = direction), size=1) +
+  scale_colour_manual(values=c("deepskyblue", "grey", "red")) +
+  xlim(-6,6) +
+  ylim(0,5) +
+  xlab(expression(paste(log[2], 'FC(Ctrl/siRNA)'))) +
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank()) +
+  theme(text = element_text(size=5)) +
+  theme(axis.text = element_text(color = "black", size = 10)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line=element_line()) +
+  geom_vline(xintercept=-abs_log2fc, linetype="dotted") +
+  geom_vline(xintercept=abs_log2fc, linetype="dotted") +
+  geom_text_repel(
+    data = subset(rna_df, label == "Yes"),
+    aes(label = symbol),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) + ggtitle("Volcano PLot for Ciclopirox Samples") + 
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/volcano_ciclopirox.png")
+
+```
+
+##### Wortmannin
+```{r}
+CountTable <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/wortmannin/output.txt", header=TRUE, row.names=1) 
+CountTable <- CountTable[c("SRR32635209", "SRR32635208", "SRR32635207", "SRR32635206", "SRR32635205", "SRR32635204")]
+samples <- read.table("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/wortmannin_sample.txt", header=TRUE)
+
+dgList <- DGEList(counts=CountTable, samples = samples, group = samples$condition)
+
+countsPerMillion <- cpm(dgList)
+countCheck <- countsPerMillion > 1
+keep <- which(rowSums(countCheck) >= 2)
+dgList <- dgList[keep,]
+
+dgList <- calcNormFactors(dgList, method="TMM")
+
+png("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/mds_wortmannin.png", width=800, height=600)
+plotMDS(dgList, main = "MDS PLot for Wortmannin Samples")
+dev.off()
+```
+
+```{r}
+condition <- as.factor(samples$condition)
+batch <- as.factor(samples$batch)
+design <- model.matrix(~batch + condition)
+rownames(design) <- colnames(dgList)
+
+disp <- estimateDisp(dgList, design)
+plotBCV(disp)
+
+et <- exactTest(disp)
+
+dat <- et$table
+
+dat$symbol <- mapIds(org.Hs.eg.db, keys=row.names(dat), column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+dat$entrez <- mapIds(org.Hs.eg.db, keys=row.names(dat), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+
+`HIFA-null_siRNA` <- dat
+adj_p_val = 0.05
+abs_log2fc = 1
+
+rna_df <- as.data.frame(`HIFA-null_siRNA`)
+rna_df$padj <-p.adjust(rna_df$PValue, method="BH")
+rna_df$log10.pvalue <- (-1 * log10(rna_df$padj))
+
+rna_df$significant <- "No"
+
+rows <- which(rna_df$padj< adj_p_val & !is.na(rna_df$padj) & abs(rna_df$logFC)>abs_log2fc)
+rna_df$significant[rows] <- "Yes"
+
+rna_df$direction <- rna_df$significant
+rna_df$direction[which(rna_df$padj < adj_p_val & rna_df$logFC > abs_log2fc)] <- "Up-Regulated"
+rna_df$direction[which(rna_df$padj < adj_p_val & rna_df$logFC < -abs_log2fc)] <- "Down-Regulated"
+write.table(rna_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/", "wortmannin_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+```
+
+```{r}
+rna_df$label <- "No"
+rna_df$label[which(rna_df$padj < adj_p_val & abs(rna_df$logFC) > abs_log2fc)] <- "Yes"
+
+ggplot(rna_df, aes(logFC, log10.pvalue)) +
+  geom_point(aes(colour = direction), size=1) +
+  scale_colour_manual(values=c("deepskyblue", "grey", "red")) +
+  xlim(-6,6) +
+  ylim(0,5) +
+  xlab(expression(paste(log[2], 'FC(Ctrl/siRNA)'))) +
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank()) +
+  theme(text = element_text(size=5)) +
+  theme(axis.text = element_text(color = "black", size = 10)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line=element_line()) +
+  geom_vline(xintercept=-abs_log2fc, linetype="dotted") +
+  geom_vline(xintercept=abs_log2fc, linetype="dotted") +
+  geom_text_repel(
+    data = subset(rna_df, label == "Yes"),
+    aes(label = symbol),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) + 
+  ggtitle("Volcano PLot for Wortmannin Samples") + 
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/volcano_wortmannin.png")
+
+```
+
+
+#### Assessing Overlap
+
+##### DMSO: 
+
+```{r}
+deseq2_df = read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/dmso_significance.txt", sep = "\t")
+edger_df = read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/dmso_significance.txt", sep = "\t")
+
+upreg_deseq2 <- filter(deseq2_df, direction == "Up-Regulated")
+upreg_deseq2 <- upreg_deseq2[order(upreg_deseq2$log2FoldChange, decreasing=TRUE),]
+
+top_upreg_genes_deseq2 <- head(upreg_deseq2[order(upreg_deseq2$pvalue), ], 10)
+print(top_upreg_genes_deseq2)
+
+downreg_deseq2 <- filter(deseq2_df, direction == "Down-Regulated")
+downreg_deseq2 <- downreg_deseq2[order(downreg_deseq2$log2FoldChange),]
+
+top_downreg_genes_deseq2 <- head(downreg_deseq2[order(downreg_deseq2$pvalue), ], 10)
+print(top_downreg_genes_deseq2)
+
+upreg_edger <- filter(edger_df, direction == "Up-Regulated")
+upreg_edger <- upreg_edger[order(upreg_edger$logFC, decreasing=TRUE),]
+
+top_upreg_genes_edgeR <- head(upreg_edger[order(upreg_edger$PValue), ], 10)
+print(top_upreg_genes_edgeR)
+
+downreg_edger <- filter(edger_df, direction == "Down-Regulated")
+downreg_edger <- downreg_edger[order(downreg_edger$logFC),]
+
+top_downreg_genes_edgeR <- head(downreg_edger[order(downreg_edger$PValue), ], 10)
+print(top_downreg_genes_edgeR)
+
+up_overlap <- inner_join(upreg_deseq2, upreg_edger, by = "entrez", relationship = "many-to-many")
+down_overlap <- inner_join(downreg_deseq2, downreg_edger, by = "entrez", relationship = "many-to-many")
+
+print(paste("Up-regulated genes overlap:", nrow(up_overlap)))
+print(paste("Down-regulated genes overlap:", nrow(down_overlap)))
+```
+
+```{r}
+na.omit(upreg_deseq2[upreg_deseq2["symbol"] == "HIF1A", ])
+na.omit(upreg_edger[upreg_edger["symbol"] == "HIF1A", ])
+na.omit(downreg_deseq2[downreg_deseq2["symbol"] == "VHL", ])
+na.omit(downreg_edger[downreg_edger["symbol"] == "VHL", ])
+
+na.omit(deseq2_df[deseq2_df["symbol"] == "HIF1A", ])
+na.omit(edger_df[edger_df["symbol"] == "HIF1A", ])
+```
+
+##### COCl2: 
+
+```{r}
+deseq2_df = read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/cocl2_significance.txt", sep = "\t")
+edger_df = read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/cocl2_significance.txt", sep = "\t")
+
+upreg_deseq2 <- filter(deseq2_df, direction == "Up-Regulated")
+upreg_deseq2 <- upreg_deseq2[order(upreg_deseq2$log2FoldChange, decreasing=TRUE),]
+
+top_upreg_genes_deseq2 <- head(upreg_deseq2[order(upreg_deseq2$pvalue), ], 10)
+print(top_upreg_genes_deseq2)
+
+downreg_deseq2 <- filter(deseq2_df, direction == "Down-Regulated")
+downreg_deseq2 <- downreg_deseq2[order(downreg_deseq2$log2FoldChange),]
+
+top_downreg_genes_deseq2 <- head(downreg_deseq2[order(downreg_deseq2$pvalue), ], 10)
+print(top_downreg_genes_deseq2)
+
+upreg_edger <- filter(edger_df, direction == "Up-Regulated")
+upreg_edger <- upreg_edger[order(upreg_edger$logFC, decreasing=TRUE),]
+
+top_upreg_genes_edgeR <- head(upreg_edger[order(upreg_edger$PValue), ], 10)
+print(top_upreg_genes_edgeR)
+
+downreg_edger <- filter(edger_df, direction == "Down-Regulated")
+downreg_edger <- downreg_edger[order(downreg_edger$logFC),]
+
+top_downreg_genes_edgeR <- head(downreg_edger[order(downreg_edger$PValue), ], 10)
+print(top_downreg_genes_edgeR)
+
+up_overlap <- inner_join(upreg_deseq2, upreg_edger, by = "entrez", relationship = "many-to-many")
+down_overlap <- inner_join(downreg_deseq2, downreg_edger, by = "entrez", relationship = "many-to-many")
+
+print(paste("Up-regulated genes overlap:", nrow(up_overlap)))
+print(paste("Down-regulated genes overlap:", nrow(down_overlap)))
+```
+
+```{r}
+na.omit(upreg_deseq2[upreg_deseq2["symbol"] == "HIF1A", ])
+na.omit(upreg_edger[upreg_edger["symbol"] == "HIF1A", ])
+na.omit(downreg_deseq2[downreg_deseq2["symbol"] == "VHL", ])
+na.omit(downreg_edger[downreg_edger["symbol"] == "VHL", ])
+
+na.omit(deseq2_df[deseq2_df["symbol"] == "HIF1A", ])
+na.omit(edger_df[edger_df["symbol"] == "HIF1A", ])
+```
+
+
+##### Ciclopirox:
+
+```{r}
+deseq2_df = read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/ciclopirox_significance.txt", sep = "\t")
+edger_df = read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/ciclopirox_significance.txt", sep = "\t")
+
+upreg_deseq2 <- filter(deseq2_df, direction == "Up-Regulated")
+upreg_deseq2 <- upreg_deseq2[order(upreg_deseq2$log2FoldChange, decreasing=TRUE),]
+
+top_upreg_genes_deseq2 <- head(upreg_deseq2[order(upreg_deseq2$pvalue), ], 10)
+print(top_upreg_genes_deseq2)
+
+downreg_deseq2 <- filter(deseq2_df, direction == "Down-Regulated")
+downreg_deseq2 <- downreg_deseq2[order(downreg_deseq2$log2FoldChange),]
+
+top_downreg_genes_deseq2 <- head(downreg_deseq2[order(downreg_deseq2$pvalue), ], 10)
+print(top_downreg_genes_deseq2)
+
+upreg_edger <- filter(edger_df, direction == "Up-Regulated")
+upreg_edger <- upreg_edger[order(upreg_edger$logFC, decreasing=TRUE),]
+
+top_upreg_genes_edgeR <- head(upreg_edger[order(upreg_edger$PValue), ], 10)
+print(top_upreg_genes_edgeR)
+
+downreg_edger <- filter(edger_df, direction == "Down-Regulated")
+downreg_edger <- downreg_edger[order(downreg_edger$logFC),]
+
+top_downreg_genes_edgeR <- head(downreg_edger[order(downreg_edger$PValue), ], 10)
+print(top_downreg_genes_edgeR)
+
+up_overlap <- inner_join(upreg_deseq2, upreg_edger, by = "entrez", relationship = "many-to-many")
+down_overlap <- inner_join(downreg_deseq2, downreg_edger, by = "entrez", relationship = "many-to-many")
+
+print(paste("Up-regulated genes overlap:", nrow(up_overlap)))
+print(paste("Down-regulated genes overlap:", nrow(down_overlap)))
+```
+
+```{r}
+na.omit(upreg_deseq2[upreg_deseq2["symbol"] == "HIF1A", ])
+na.omit(upreg_edger[upreg_edger["symbol"] == "HIF1A", ])
+na.omit(downreg_deseq2[downreg_deseq2["symbol"] == "VHL", ])
+na.omit(downreg_edger[downreg_edger["symbol"] == "VHL", ])
+
+na.omit(deseq2_df[deseq2_df["symbol"] == "HIF1A", ])
+na.omit(edger_df[edger_df["symbol"] == "HIF1A", ])
+```
+
+
+##### Wortmannin: 
+
+```{r}
+deseq2_df = read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/DESeq2_output/wortmannin_significance.txt", sep = "\t")
+edger_df = read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/edgeR_output/wortmannin_significance.txt", sep = "\t")
+
+upreg_deseq2 <- filter(deseq2_df, direction == "Up-Regulated")
+upreg_deseq2 <- upreg_deseq2[order(upreg_deseq2$log2FoldChange, decreasing=TRUE),]
+
+top_upreg_genes_deseq2 <- head(upreg_deseq2[order(upreg_deseq2$pvalue), ], 10)
+print(top_upreg_genes_deseq2)
+
+downreg_deseq2 <- filter(deseq2_df, direction == "Down-Regulated")
+downreg_deseq2 <- downreg_deseq2[order(downreg_deseq2$log2FoldChange),]
+
+top_downreg_genes_deseq2 <- head(downreg_deseq2[order(downreg_deseq2$pvalue), ], 10)
+print(top_downreg_genes_deseq2)
+
+upreg_edger <- filter(edger_df, direction == "Up-Regulated")
+upreg_edger <- upreg_edger[order(upreg_edger$logFC, decreasing=TRUE),]
+
+top_upreg_genes_edgeR <- head(upreg_edger[order(upreg_edger$PValue), ], 10)
+print(top_upreg_genes_edgeR)
+
+downreg_edger <- filter(edger_df, direction == "Down-Regulated")
+downreg_edger <- downreg_edger[order(downreg_edger$logFC),]
+
+top_downreg_genes_edgeR <- head(downreg_edger[order(downreg_edger$PValue), ], 10)
+print(top_downreg_genes_edgeR)
+
+up_overlap <- inner_join(upreg_deseq2, upreg_edger, by = "entrez", relationship = "many-to-many")
+down_overlap <- inner_join(downreg_deseq2, downreg_edger, by = "entrez", relationship = "many-to-many")
+
+print(paste("Up-regulated genes overlap:", nrow(up_overlap)))
+print(paste("Down-regulated genes overlap:", nrow(down_overlap)))
+```
+
+```{r}
+na.omit(upreg_deseq2[upreg_deseq2["symbol"] == "HIF1A", ])
+na.omit(upreg_edger[upreg_edger["symbol"] == "HIF1A", ])
+na.omit(downreg_deseq2[downreg_deseq2["symbol"] == "VHL", ])
+na.omit(downreg_edger[downreg_edger["symbol"] == "VHL", ])
+
+na.omit(deseq2_df[deseq2_df["symbol"] == "HIF1A", ])
+na.omit(edger_df[edger_df["symbol"] == "HIF1A", ])
+```
+
+
+#### Sleuth
+
+For fun, I just wanted to use sleuth to look at transcript level DE results
+```{r}
+mart <- useMart(biomart = "ENSEMBL_MART_ENSEMBL", 
+                         dataset = "hsapiens_gene_ensembl", 
+                         host = "https://www.ensembl.org")
+t2g <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id", "external_gene_name"), mart = mart)
+t2g <- rename(t2g, target_id = ensembl_transcript_id, ens_gene = ensembl_gene_id, ext_gene = external_gene_name)
+t2g$target_id <- sub("\\..*", "", t2g$target_id)
+
+sample_info <- read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/dmso_sample.txt", sep = "\t")
+sample_info$sample <- row.names(sample_info)
+sample_paths <- file.path("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/dmso", sample_info$sample)
+sample_info$path <- sample_paths
+
+so <- sleuth_prep(sample_info, extra_bootstrap_summary = TRUE, target_mapping = t2g)
+
+so <- sleuth_fit(so, ~condition + batch, 'full')
+
+so <- sleuth_fit(so, ~1, 'reduced')
+
+so <- sleuth_lrt(so, 'reduced', 'full')
+
+so <- sleuth_wt(so, 'conditionWT', 'full')
+```
+
+```{r}
+print(models(so))
+
+sleuth_table <- sleuth_results(so, 'reduced:full', 'lrt', show_all = FALSE)
+sleuth_significant <- dplyr::filter(sleuth_table, qval <= 0.05)
+head(sleuth_significant, 20)
+```
+
+```{r}
+sleuth_table <- sleuth_results(so, 'reduced:full', 'lrt', show_all = TRUE)
+
+wald_results <- sleuth_results(so, 'conditionWT', 'wald', show_all = TRUE)
+
+sig_results <- filter(wald_results, qval <= 0.05 & abs(b) > 1)
+
+sig_results <- sig_results %>%
+  dplyr::filter(qval <= 0.05 & abs(b) > 1) %>%
+  dplyr::mutate(regulation = ifelse(b > 0, "Up-regulated", "Down-regulated"))
+
+write.table(rna_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/sleuth_output/", "dmso_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+
+upregulated <- filter(sig_results, b > 0)
+downregulated <- filter(sig_results, b < 0)
+
+cat("Number of significantly upregulated genes:", nrow(upregulated), "\n")
+cat("Number of significantly downregulated genes:", nrow(downregulated), "\n")
+
+cat("\nTop 10 upregulated genes:\n")
+print(head(upregulated[order(upregulated$b, decreasing = TRUE), ], 10))
+
+cat("\nTop 10 downregulated genes:\n")
+print(head(downregulated[order(downregulated$b), ], 10))
+```
+
+```{r}
+wald_results$log10.pvalue <- -log10(wald_results$qval)
+wald_results$direction <- ifelse(wald_results$qval < 0.05 & abs(wald_results$b) > 1,
+                                  ifelse(wald_results$b > 0, "Up", "Down"),
+                                  "Not Significant")
+wald_results$label <- ifelse(wald_results$direction != "Not Significant", "Yes", "No")
+wald_results$symbol <- wald_results$ext_gene
+abs_log2fc <- 1
+
+ggplot(wald_results, aes(x = b, y = log10.pvalue)) +
+  geom_point(aes(colour = direction), size = 1) +
+  scale_colour_manual(values = c("deepskyblue", "grey", "red")) +
+  xlim(-6, 6) +
+  ylim(0, 6) +
+  xlab(expression(paste(log[2], 'FC(CHIF1A-null/WT)'))) +
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank(),
+        text = element_text(size = 5),
+        axis.text = element_text(color = "black", size = 10),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line()) +
+  geom_vline(xintercept = c(-abs_log2fc, abs_log2fc), linetype = "dotted") +
+  geom_text_repel(
+    data = subset(wald_results, label == "Yes"),
+    aes(label = symbol),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) +
+  ggtitle("Volcano Plot for DMSO Samples") +
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/sleuth_output/volcano_dmso.png")
+```
+
+
+```{r}
+so$sample_to_covariates$group <- paste(so$sample_to_covariates$condition,
+                                       so$sample_to_covariates$batch,
+                                       sep = "_")
+p1 = plot_pca(so, color_by = 'condition')
+p2 = plot_pca(so, color_by = 'batch')
+p3 = plot_pca(so, color_by = 'group')
+
+plot = ggarrange(p1, p2, p3, ncol = 3)
+annotate_figure(plot, top = text_grob("PCA Plots for DMSO Samples", size = 14))
+```
+
+
+```{r}
+p1 = plot_bootstrap(so, "ENST00000599335.5", units = "est_counts", color_by = "condition") + ggtitle("SUPT5H")
+p2 = plot_bootstrap(so, "ENST00000452707.1", units = "est_counts", color_by = "condition") + ggtitle("NUDC")
+p3 = plot_bootstrap(so, "ENST00000518075.1", units = "est_counts", color_by = "condition") + ggtitle("XAGE1B")
+
+plot = ggarrange(p1, p2, p3, ncol = 3, common.legend  = TRUE, legend="bottom")
+annotate_figure(plot, top = text_grob("Bootstrap Plots for Top Differentially Expressed Genes in DMSO Samples", size = 14))
+```
+
+```{r}
+plot_group_density(so, use_filtered = TRUE, units = "est_counts",
+  trans = "log", grouping = "group", offset = 1) + ggtitle("Group Density of DMSO Samples")
+```
+```{r}
+sample_info <- read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/cocl2_sample.txt", sep = "\t")
+sample_info$sample <- row.names(sample_info)
+sample_paths <- file.path("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/cocl2", sample_info$sample)
+sample_info$path <- sample_paths
+
+so <- sleuth_prep(sample_info, extra_bootstrap_summary = TRUE, target_mapping = t2g)
+
+so <- sleuth_fit(so, ~condition + batch, 'full')
+
+so <- sleuth_fit(so, ~1, 'reduced')
+
+so <- sleuth_lrt(so, 'reduced', 'full')
+
+so <- sleuth_wt(so, 'conditionWT', 'full')
+
+print(models(so))
+
+sleuth_table <- sleuth_results(so, 'reduced:full', 'lrt', show_all = TRUE)
+sleuth_significant <- dplyr::filter(sleuth_table, qval <= 0.05)
+head(sleuth_significant, 20)
+```
+
+```{r}
+sleuth_table <- sleuth_results(so, 'reduced:full', 'lrt', show_all = TRUE)
+
+wald_results <- sleuth_results(so, 'conditionWT', 'wald', show_all = TRUE)
+
+sig_results <- filter(wald_results, qval <= 0.05 & abs(b) > 1)
+
+sig_results <- sig_results %>%
+  dplyr::filter(qval <= 0.05 & abs(b) > 1) %>%
+  dplyr::mutate(regulation = ifelse(b > 0, "Up-regulated", "Down-regulated"))
+
+write.table(rna_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/sleuth_output/", "cocl2_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+
+upregulated <- filter(sig_results, b > 0)
+downregulated <- filter(sig_results, b < 0)
+
+cat("Number of significantly upregulated genes:", nrow(upregulated), "\n")
+cat("Number of significantly downregulated genes:", nrow(downregulated), "\n")
+
+cat("\nTop 10 upregulated genes:\n")
+print(head(upregulated[order(upregulated$b, decreasing = TRUE), ], 10))
+
+cat("\nTop 10 downregulated genes:\n")
+print(head(downregulated[order(downregulated$b), ], 10))
+```
+
+```{r}
+wald_results$log10.pvalue <- -log10(wald_results$qval)
+wald_results$direction <- ifelse(wald_results$qval < 0.05 & abs(wald_results$b) > 1,
+                                  ifelse(wald_results$b > 0, "Up", "Down"),
+                                  "Not Significant")
+wald_results$label <- ifelse(wald_results$direction != "Not Significant", "Yes", "No")
+wald_results$symbol <- wald_results$ext_gene
+abs_log2fc <- 1
+
+ggplot(wald_results, aes(x = b, y = log10.pvalue)) +
+  geom_point(aes(colour = direction), size = 1) +
+  scale_colour_manual(values = c("deepskyblue", "grey", "red")) +
+  xlim(-6, 6) +
+  ylim(0, 6) +
+  xlab(expression(paste(log[2], 'FC(CHIF1A-null/WT)'))) +
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank(),
+        text = element_text(size = 5),
+        axis.text = element_text(color = "black", size = 10),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line()) +
+  geom_vline(xintercept = c(-abs_log2fc, abs_log2fc), linetype = "dotted") +
+  geom_text_repel(
+    data = subset(wald_results, label == "Yes"),
+    aes(label = symbol),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) +
+  ggtitle("Volcano Plot for COCl2 Samples") +
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/sleuth_output/volcano_cocl2.png")
+```
+
+```{r}
+so$sample_to_covariates$group <- paste(so$sample_to_covariates$condition,
+                                       so$sample_to_covariates$batch,
+                                       sep = "_")
+
+p1 = plot_pca(so, color_by = 'condition')
+p2 = plot_pca(so, color_by = 'batch')
+p3 = plot_pca(so, color_by = 'group')
+
+plot = ggarrange(p1, p2, p3, ncol = 3)
+annotate_figure(plot, top = text_grob("PCA Plots for COCl2 Samples", size = 14))
+```
+
+```{r}
+p1 = plot_bootstrap(so, "ENST00000464055.5", units = "est_counts", color_by = "condition") + ggtitle("ZDHHC20")
+p2 = plot_bootstrap(so, "ENST00000533195.5", units = "est_counts", color_by = "condition") + ggtitle("APLP2")
+p3 = plot_bootstrap(so, "ENST00000579649.5", units = "est_counts", color_by = "condition") + ggtitle("RPL36")
+
+plot = ggarrange(p1, p2, p3, ncol = 3, common.legend  = TRUE, legend="bottom")
+annotate_figure(plot, top = text_grob("Bootstrap Plots for Top Differentially Expressed Genes in COCl2 Samples", size = 14))
+```
+
+```{r}
+plot_group_density(so, use_filtered = TRUE, units = "est_counts",
+  trans = "log", grouping = "group", offset = 1) + ggtitle("Group Density of COCl2 Samples")
+```
+
+```{r}
+sample_info <- read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/ciclopirox_sample.txt", sep = "\t")
+sample_info$sample <- row.names(sample_info)
+sample_paths <- file.path("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/ciclopirox", sample_info$sample)
+sample_info$path <- sample_paths
+
+so <- sleuth_prep(sample_info, extra_bootstrap_summary = TRUE, target_mapping = t2g)
+
+so <- sleuth_fit(so, ~condition + batch, 'full')
+
+so <- sleuth_fit(so, ~1, 'reduced')
+
+so <- sleuth_lrt(so, 'reduced', 'full')
+
+so <- sleuth_wt(so, 'conditionWT', 'full')
+
+print(models(so))
+
+sleuth_table <- sleuth_results(so, 'reduced:full', 'lrt', show_all = TRUE)
+sleuth_significant <- dplyr::filter(sleuth_table, qval <= 0.05)
+head(sleuth_significant, 20)
+```
+
+```{r}
+sleuth_table <- sleuth_results(so, 'reduced:full', 'lrt', show_all = TRUE)
+
+wald_results <- sleuth_results(so, 'conditionWT', 'wald', show_all = TRUE)
+
+sig_results <- filter(wald_results, qval <= 0.05 & abs(b) > 1)
+
+sig_results <- sig_results %>%
+  dplyr::filter(qval <= 0.05 & abs(b) > 1) %>%
+  dplyr::mutate(regulation = ifelse(b > 0, "Up-regulated", "Down-regulated"))
+
+write.table(rna_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/sleuth_output/", "ciclopirox_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+
+upregulated <- filter(sig_results, b > 0)
+downregulated <- filter(sig_results, b < 0)
+
+cat("Number of significantly upregulated genes:", nrow(upregulated), "\n")
+cat("Number of significantly downregulated genes:", nrow(downregulated), "\n")
+
+cat("\nTop 10 upregulated genes:\n")
+print(head(upregulated[order(upregulated$b, decreasing = TRUE), ], 10))
+
+cat("\nTop 10 downregulated genes:\n")
+print(head(downregulated[order(downregulated$b), ], 10))
+```
+
+```{r}
+wald_results$log10.pvalue <- -log10(wald_results$qval)
+wald_results$direction <- ifelse(wald_results$qval < 0.05 & abs(wald_results$b) > 1,
+                                  ifelse(wald_results$b > 0, "Up", "Down"),
+                                  "Not Significant")
+wald_results$label <- ifelse(wald_results$direction != "Not Significant", "Yes", "No")
+wald_results$symbol <- wald_results$ext_gene
+abs_log2fc <- 1
+
+ggplot(wald_results, aes(x = b, y = log10.pvalue)) +
+  geom_point(aes(colour = direction), size = 1) +
+  scale_colour_manual(values = c("deepskyblue", "grey", "red")) +
+  xlim(-6, 6) +
+  ylim(0, 6) +
+  xlab(expression(paste(log[2], 'FC(CHIF1A-null/WT)'))) +
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank(),
+        text = element_text(size = 5),
+        axis.text = element_text(color = "black", size = 10),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line()) +
+  geom_vline(xintercept = c(-abs_log2fc, abs_log2fc), linetype = "dotted") +
+  geom_text_repel(
+    data = subset(wald_results, label == "Yes"),
+    aes(label = symbol),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) +
+  ggtitle("Volcano Plot for Ciclopirox Samples") +
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/sleuth_output/volcano_ciclopirox.png")
+```
+
+```{r}
+so$sample_to_covariates$group <- paste(so$sample_to_covariates$condition,
+                                       so$sample_to_covariates$batch,
+                                       sep = "_")
+
+p1 = plot_pca(so, color_by = 'condition')
+p2 = plot_pca(so, color_by = 'batch')
+p3 = plot_pca(so, color_by = 'group')
+
+plot = ggarrange(p1, p2, p3, ncol = 3)
+annotate_figure(plot, top = text_grob("PCA Plots for Ciclopirox Samples", size = 14))
+```
+
+```{r}
+p1 = plot_bootstrap(so, "ENST00000611747.1", units = "est_counts", color_by = "condition") + ggtitle("N/A")
+p2 = plot_bootstrap(so, "ENST00000573367.5", units = "est_counts", color_by = "condition") + ggtitle("SIRT7")
+p3 = plot_bootstrap(so, "ENST00000520617.1", units = "est_counts", color_by = "condition") + ggtitle("LOXL2	")
+
+plot = ggarrange(p1, p2, p3, ncol = 3, common.legend  = TRUE, legend="bottom")
+annotate_figure(plot, top = text_grob("Bootstrap Plots for Top Differentially Expressed Genes in Ciclopirox Samples", size = 14))
+```
+
+```{r}
+plot_group_density(so, use_filtered = TRUE, units = "est_counts",
+  trans = "log", grouping = "group", offset = 1) + ggtitle("Group Density of Ciclopirox Samples")
+```
+
+```{r}
+sample_info <- read.csv("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/samples/wortmannin_sample.txt", sep = "\t")
+sample_info$sample <- row.names(sample_info)
+sample_paths <- file.path("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/kallisto/wortmannin", sample_info$sample)
+sample_info$path <- sample_paths
+
+so <- sleuth_prep(sample_info, extra_bootstrap_summary = TRUE, target_mapping = t2g)
+
+so <- sleuth_fit(so, ~condition + batch, 'full')
+
+so <- sleuth_fit(so, ~1, 'reduced')
+
+so <- sleuth_lrt(so, 'reduced', 'full')
+
+so <- sleuth_wt(so, 'conditionWT', 'full')
+
+print(models(so))
+
+sleuth_table <- sleuth_results(so, 'reduced:full', 'lrt', show_all = TRUE)
+sleuth_significant <- dplyr::filter(sleuth_table, qval <= 0.05)
+head(sleuth_significant, 20)
+```
+
+```{r}
+sleuth_table <- sleuth_results(so, 'reduced:full', 'lrt', show_all = TRUE)
+
+wald_results <- sleuth_results(so, 'conditionWT', 'wald', show_all = TRUE)
+
+sig_results <- filter(wald_results, qval <= 0.05 & abs(b) > 1)
+
+sig_results <- sig_results %>%
+  dplyr::filter(qval <= 0.05 & abs(b) > 1) %>%
+  dplyr::mutate(regulation = ifelse(b > 0, "Up-regulated", "Down-regulated"))
+
+write.table(rna_df,paste0("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/sleuth_output/", "wortmannin_significance.txt"), row.names=TRUE,quote = F, sep = "\t")
+
+upregulated <- filter(sig_results, b > 0)
+downregulated <- filter(sig_results, b < 0)
+
+cat("Number of significantly upregulated genes:", nrow(upregulated), "\n")
+cat("Number of significantly downregulated genes:", nrow(downregulated), "\n")
+
+cat("\nTop 10 upregulated genes:\n")
+print(head(upregulated[order(upregulated$b, decreasing = TRUE), ], 10))
+
+cat("\nTop 10 downregulated genes:\n")
+print(head(downregulated[order(downregulated$b), ], 10))
+```
+
+```{r}
+wald_results$log10.pvalue <- -log10(wald_results$qval)
+wald_results$direction <- ifelse(wald_results$qval < 0.05 & abs(wald_results$b) > 1,
+                                  ifelse(wald_results$b > 0, "Up", "Down"),
+                                  "Not Significant")
+wald_results$label <- ifelse(wald_results$direction != "Not Significant", "Yes", "No")
+wald_results$symbol <- wald_results$ext_gene
+abs_log2fc <- 1
+
+ggplot(wald_results, aes(x = b, y = log10.pvalue)) +
+  geom_point(aes(colour = direction), size = 1) +
+  scale_colour_manual(values = c("deepskyblue", "grey", "red")) +
+  xlim(-6, 6) +
+  ylim(0, 6) +
+  xlab(expression(paste(log[2], 'FC(CHIF1A-null/WT)'))) +
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme(panel.background = element_blank(),
+        text = element_text(size = 5),
+        axis.text = element_text(color = "black", size = 10),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line()) +
+  geom_vline(xintercept = c(-abs_log2fc, abs_log2fc), linetype = "dotted") +
+  geom_text_repel(
+    data = subset(wald_results, label == "Yes"),
+    aes(label = symbol),
+    size = 2,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  ) +
+  ggtitle("Volcano Plot for Wortmannin Samples") +
+  theme(plot.title = element_text(size = 12))
+
+ggsave("/Users/yojozho/Desktop/spring2025/applied_info/applied_seq_final/analysis/sleuth_output/volcano_wortmannin.png")
+```
+
+```{r}
+so$sample_to_covariates$group <- paste(so$sample_to_covariates$condition,
+                                       so$sample_to_covariates$batch,
+                                       sep = "_")
+
+p1 = plot_pca(so, color_by = 'condition')
+p2 = plot_pca(so, color_by = 'batch')
+p3 = plot_pca(so, color_by = 'group')
+
+plot = ggarrange(p1, p2, p3, ncol = 3)
+annotate_figure(plot, top = text_grob("PCA Plots for Wortmannin Samples", size = 14))
+```
+
+```{r}
+p1 = plot_bootstrap(so, "ENST00000577712.5", units = "est_counts", color_by = "condition") + ggtitle("DCXR")
+p2 = plot_bootstrap(so, "ENST00000368003.6", units = "est_counts", color_by = "condition") + ggtitle("UFC1")
+
+plot = ggarrange(p1, p2, common.legend  = TRUE, legend="bottom")
+annotate_figure(plot, top = text_grob("Bootstrap Plots for Top Differentially Expressed Genes in Wortmannin Samples", size = 14))
+```
+
+```{r}
+plot_group_density(so, use_filtered = TRUE, units = "est_counts",
+  trans = "log", grouping = "group", offset = 1) + ggtitle("Group Density of Wortmannin Samples")
+```
